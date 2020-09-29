@@ -7,6 +7,7 @@ import 'dart:convert';
 
 import 'package:gcloud/service_scope.dart' as ss;
 import 'package:http/http.dart' as http;
+import 'package:pool/pool.dart';
 
 import '../scorecard/backend.dart';
 import '../shared/configuration.dart';
@@ -27,10 +28,21 @@ SearchClient get searchClient => ss.lookup(#_searchClient) as SearchClient;
 class SearchClient {
   /// The HTTP client used for making calls to our search service.
   final http.Client _httpClient;
+  final _pendingAsyncUpdates = <String>{};
+  final _asyncCacheUpdatePool = Pool(1);
 
   SearchClient([http.Client client]) : _httpClient = client ?? http.Client();
 
-  Future<PackageSearchResult> search(SearchQuery query, {Duration ttl}) async {
+  /// Calls the search service (or uses cache) to serve the [query].
+  ///
+  /// If the [updateCacheAfter] is set, and the currently cached value is older
+  /// than the specified value, the client will do a non-cached request to the
+  /// search service and update the cached value.
+  Future<PackageSearchResult> search(
+    SearchQuery query, {
+    Duration ttl,
+    Duration updateCacheAfter,
+  }) async {
     // check validity first
     final validity = query.evaluateValidity();
     if (validity.isRejected) {
@@ -73,9 +85,29 @@ class SearchClient {
       return result;
     }
 
-    return await cache
-            .packageSearchResult(serviceUrl, ttl: ttl)
-            .get(searchFn) ??
+    void scheduleCacheUpdate() {
+      if (_pendingAsyncUpdates.contains(serviceUrlParams)) return;
+      _pendingAsyncUpdates.add(serviceUrlParams);
+      _asyncCacheUpdatePool.withResource(() async {
+        final rs = await searchFn();
+        if (rs != null && rs.message != null) {
+          await cache.packageSearchResult(serviceUrl, ttl: ttl).set(rs);
+        }
+      }).whenComplete(() {
+        _pendingAsyncUpdates.remove(serviceUrlParams);
+      });
+    }
+
+    final result =
+        await cache.packageSearchResult(serviceUrl, ttl: ttl).get(searchFn);
+
+    if (updateCacheAfter != null &&
+        result?.timestamp != null &&
+        result.age > updateCacheAfter) {
+      scheduleCacheUpdate();
+    }
+
+    return result ??
         PackageSearchResult.empty(
             message: 'Search is temporarily unavailable.');
   }
@@ -88,6 +120,7 @@ class SearchClient {
   }
 
   Future<void> close() async {
+    await _asyncCacheUpdatePool.close();
     _httpClient.close();
   }
 }
