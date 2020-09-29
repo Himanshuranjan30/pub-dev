@@ -7,6 +7,7 @@ import 'dart:convert';
 
 import 'package:gcloud/service_scope.dart' as ss;
 import 'package:http/http.dart' as http;
+import 'package:logging/logging.dart';
 import 'package:pool/pool.dart';
 
 import '../scorecard/backend.dart';
@@ -15,6 +16,8 @@ import '../shared/redis_cache.dart' show cache;
 import '../shared/utils.dart';
 
 import 'search_service.dart';
+
+final _logger = Logger('pub.search.client');
 
 /// Sets the search client.
 void registerSearchClient(SearchClient client) =>
@@ -89,6 +92,7 @@ class SearchClient {
       if (_pendingAsyncUpdates.contains(serviceUrlParams)) return;
       _pendingAsyncUpdates.add(serviceUrlParams);
       _asyncCacheUpdatePool.withResource(() async {
+        _logger.info('Updating search cache for $serviceUrl...');
         final rs = await searchFn();
         if (rs != null && rs.message != null) {
           await cache.packageSearchResult(serviceUrl, ttl: ttl).set(rs);
